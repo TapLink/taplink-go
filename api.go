@@ -226,6 +226,9 @@ func (c *Client) getSalt(hash []byte, versionID int64) (s *Salt, err error) {
 		if err == nil || attempts > RetryLimit {
 			break
 		}
+		if resp.TLS == nil {
+			panic("Unencrypted response")
+		}
 		c.incrErrs(0)
 		attempts++
 		time.Sleep(RetryDelay)
