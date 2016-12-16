@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -41,12 +40,22 @@ type API interface {
 	VerifyPassword(hash []byte, expectedHash []byte, versionID int64) (*VerifyPassword, error)
 	NewPassword(hash []byte) (*NewPassword, error)
 
-	// Statisics related funcs
+	// Requests returns the total number of HTTP requests made to the TapLink API, including those with errors and those without
 	Requests() int64
+
+	// Errors returns the total number of HTTP requests made to the TapLink API which ended in error
 	Errors() int64
+
+	// Latency returns the average latency of requests made to the TapLink API
 	Latency() time.Duration
+
+	// ErrorPct returns the pct of requests made to the TapLink API which ended in error.
 	ErrorPct() int64
+
+	// EnableStats starts the collection of stats regarding HTTP requests made to the TapLink API
 	EnableStats()
+
+	// DisableStats starts the collection of stats regarding HTTP requests made to the TapLink API
 	DisableStats()
 }
 
@@ -62,7 +71,9 @@ type Client struct {
 
 type saltResponse struct {
 	Salt2Hex     string `json:"s2"`
-	NewVersionID int64  `json:"vid"`
+	VersionID    int64  `json:"vid"`
+	NewSalt2Hex  string `json:"new_s2"`
+	NewVersionID int64  `json:"new_vid"`
 }
 
 // Version is a version number for the TapLink API
@@ -71,7 +82,7 @@ type Version int64
 // String implements fmt.Stringer interface. If the version is empty, the API expects "" so this return it that way
 func (v Version) String() string {
 	if v == 0 {
-		return ""
+		return fmt.Sprintf("")
 	}
 	return fmt.Sprintf("%d", v)
 }
@@ -94,6 +105,7 @@ func (s Salt) String() string {
 // VerifyPassword provides information about whether a password matched and related hashes
 type VerifyPassword struct {
 	Matched      bool
+	VersionID    int64
 	NewVersionID int64
 	Hash         []byte
 	NewHash      []byte
@@ -139,6 +151,7 @@ func (c *Client) Config() Configuration {
 // 'versionId'        - version identifier for data pool settings to use
 // If a new 'versionId' and 'hash2' value are returned, they can either be ignored, or both must be updated in the data store together which
 // will cause the latest data pool settings to be used when blind hashing for this user in the future.
+// If the versionID is 0, the default version will be used
 func (c *Client) VerifyPassword(hash []byte, expected []byte, versionID int64) (*VerifyPassword, error) {
 	salt, err := c.getSalt(hash, versionID)
 	if err != nil {
@@ -146,9 +159,9 @@ func (c *Client) VerifyPassword(hash []byte, expected []byte, versionID int64) (
 	}
 	sum := hmac.New(sha512.New, salt.Salt)
 	sum.Write(hash)
-	vp := &VerifyPassword{Hash: sum.Sum(nil)}
+	vp := &VerifyPassword{Hash: sum.Sum(nil), NewVersionID: salt.NewVersionID, VersionID: salt.VersionID}
 	vp.Matched = bytes.Equal(vp.Hash, expected)
-	if vp.Matched && salt.NewVersionID != 0 && salt.NewSalt != nil {
+	if vp.Matched && salt.VersionID != salt.NewVersionID && salt.NewSalt != nil {
 		sum2 := hmac.New(sha512.New, salt.NewSalt)
 		sum2.Write(hash)
 		vp.NewHash = sum2.Sum(nil)
@@ -173,10 +186,8 @@ func (c *Client) NewPassword(hash1 []byte) (*NewPassword, error) {
 	// Calculate the hash of the new salt
 	sum := hmac.New(sha512.New, salt.Salt)
 	sum.Write(hash1)
-	return &NewPassword{
-		VersionID: salt.VersionID,
-		Hash:      sum.Sum(nil),
-	}, nil
+
+	return &NewPassword{VersionID: salt.VersionID, Hash: sum.Sum(nil)}, nil
 }
 
 // GetSalt retreives a salt value from the data pool, given a 'hash1' value and optionally, a version id
@@ -192,7 +203,8 @@ func (c *Client) NewPassword(hash1 []byte) (*NewPassword, error) {
 //       o newVersionId : a new version id, if newer data pool settings are available, otherwise undefined
 func (c *Client) getSalt(hash []byte, versionID int64) (s *Salt, err error) {
 
-	req, err := http.NewRequest("GET", fmt.Sprintf("%s/%s/%s/%s", c.Config().Host(), c.Config().AppID(), hex.EncodeToString(hash), Version(versionID)), nil)
+	uri := fmt.Sprintf("%s/%s/%s/%s", c.Config().Host(), c.Config().AppID(), hex.EncodeToString(hash), Version(versionID))
+	req, err := http.NewRequest("GET", uri, nil)
 	if err != nil {
 		return
 	}
@@ -243,35 +255,35 @@ func (c *Client) getSalt(hash []byte, versionID int64) (s *Salt, err error) {
 	defer resp.Body.Close()
 	bodyBytes, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return
 	}
 
 	// If not a 200 request, return the status text as the error message
 	if resp.StatusCode != http.StatusOK {
-		return nil, errors.New(strings.TrimSpace(string(bodyBytes)))
+		err = errors.New(strings.TrimSpace(string(bodyBytes)))
+		return
 	}
 
 	var sr saltResponse
 	err = json.Unmarshal(bodyBytes, &sr)
 	if err != nil {
-		log.Println(string(bodyBytes))
 		return
 	}
 
+	// Use the values from the request in the return value
+	s = &Salt{NewVersionID: sr.NewVersionID, VersionID: sr.VersionID}
+
 	// Hex encoding is used over the wire, so decode here.
-	sb, err := hex.DecodeString(sr.Salt2Hex)
+	s.Salt, err = hex.DecodeString(sr.Salt2Hex)
 	if err != nil {
 		return
 	}
 
-	// Return the Salt struct
-	// TODO need to determine the new salt paramater as returned from the API and update accordingly
-	s = &Salt{
-		NewVersionID: sr.NewVersionID,
-		VersionID:    versionID,
-		Salt:         sb,
-		NewSalt:      nil,
+	if sr.NewSalt2Hex == "" {
+		return
 	}
+
+	s.NewSalt, err = hex.DecodeString(sr.NewSalt2Hex)
 	return
 }
 

@@ -15,7 +15,6 @@ var (
 	testAppID    = "7ddf60de9250dce2f9f9a4ff1f5be257eb42e81d872a9381271edddae1fb83f2f99b89f138354fb8098d1e9b6681d6b0a58bbd2b26637b545c1c32607e85d7cf"
 	errRespAppID = "First part of the path must be a 64-byte AppID, encoded as a 128-character hexidecimal string, e.g. '/<AppID>/'"
 	errRespHash  = "Second part of the path must be a 64-byte Hash, encoded as a 128-character hexidecimal string, e.g. '/<AppID>/<Hash>/'"
-	mockCfgResp  = `{"lastModified":1481831132236,"servers":["api.taplink.co","api-us-west.taplink.co"]}`
 
 	testHashString            = "7ddf60de9250dce2f9f9a4ff1f5be257eb42e81d872a9381271edddae1fb83f2f99b89f138354fb8098d1e9b6681d6b0a58bbd2b26637b545c1c32607e85d7cf"
 	testHashBytes             []byte
@@ -121,6 +120,33 @@ func TestVerifyPassword(t *testing.T) {
 	assert.NotNil(t, v)
 	assert.True(t, v.Matched)
 	assert.Equal(t, testPasswordSumHashStr, fmt.Sprintf("%s", v))
+}
+
+func TestVerifyPasswordNewVersion(t *testing.T) {
+	c := New(testAppID).(*Client)
+
+	// Get the old expected. Need to use the older version of getSalt for that.
+	// Cannot depend on NewPassword because it uses the latest version.
+	salt, err := c.getSalt(testHashBytes, 2)
+	prevSum := hmac.New(sha512.New, salt.Salt)
+	prevSum.Write(testHashBytes)
+	prevExpected := prevSum.Sum(nil)
+
+	v, err := c.VerifyPassword(testHashBytes, prevExpected, 2)
+
+	// Now get the expected values for the new version. These will then be comparted to
+	// the VerifyPassword NewHash field.
+	p, err := c.NewPassword(testHashBytes)
+	if !assert.NoError(t, err) {
+		return
+	}
+
+	assert.NoError(t, err)
+	assert.NotNil(t, v)
+	assert.True(t, v.Matched)
+	assert.Equal(t, p.Hash, v.NewHash)
+	assert.Equal(t, int64(2), v.VersionID)
+	assert.Equal(t, int64(3), v.NewVersionID)
 }
 
 func TestVerifyPasswordError(t *testing.T) {
