@@ -62,3 +62,35 @@ func main() {
 	api.DisableStats()
 }
 ```
+
+If you're using on App Engine, then you'll need to set the HTTPClient with a valid
+App Engine compatible HTTP client. You'll have to do this for every request.
+You can do this in two ways:
+
+```go
+import (
+    "net/http"
+
+    "google.golang.org/appengine"
+
+    "github.com/TapLink/taplink-go"
+)
+
+func myHandler(w http.ResponseWriter, r *http.Request) {
+
+    ctx := appengine.NewContext(r)
+
+    // First option, set the context with UseContext(). Note that this function
+    // is not available for code which is not running in App Engine, and won't
+    // compile outside the App Engine environment.
+    taplink.UseContext(ctx)
+
+    // Second option, set the HTTPClient directly. This would allow further
+    // customization of the client if needed.
+    client := urlfetch.New(ctx)
+    taplink.HTTPClient = client
+
+    // Now do something with the Taplink library, as in previous examples...
+}
+
+```
