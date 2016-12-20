@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"strings"
@@ -28,7 +29,20 @@ var (
 	RetryLimit = 3
 	// RetryDelay is the duration to wait between retry attempts
 	RetryDelay = 1 * time.Second
+
+	// testResponse
+	mockResponse *testResponse
+
+	// maxResponseSize is the largest Content-Length allowed from the API
+	// prevents consuming too much memory from overly large upstream responses
+	// that should theoretically never be the case, but it's there just in case
+	maxResponseSize int64 = 1024 * 500
 )
+
+type testResponse struct {
+	body []byte
+	err  error
+}
 
 // API is an interface which exposes TapLink API functionality
 type API interface {
@@ -190,6 +204,63 @@ func (c *Client) NewPassword(hash1 []byte) (*NewPassword, error) {
 	return &NewPassword{VersionID: salt.VersionID, Hash: sum.Sum(nil)}, nil
 }
 
+func (c *Client) getFromAPI(uri string) (respBody []byte, err error) {
+
+	// if defined a mockResponse for testing, then return it instead of doing an actual HTTP request.
+	if mockResponse != nil {
+		return mockResponse.body, mockResponse.err
+	}
+
+	req, _ := http.NewRequest("GET", uri, nil)
+	for k, v := range c.Config().Headers() {
+		req.Header.Set(k, v)
+	}
+
+	var t time.Time
+	var attempts int
+	var resp *http.Response
+
+	// Attempt to connect until the attempt limit has been reached.
+	// Reset the timer in each loop so the final result will have the proper
+	// latency value.
+	for {
+		attempts++
+		t = time.Now()
+		resp, err = HTTPClient.Do(req)
+		// Make sure it was sent with TLS
+		if resp != nil && resp.TLS == nil {
+			panic("Unencrypted response")
+		}
+		if err == nil {
+			c.incrSuccess(time.Since(t))
+			break
+		}
+		c.incrErrs(time.Since(t))
+
+		// If out of attempts, then just quit. Otherwise try again.
+		// We check here (after the request) so that even if RetryLimit < 1
+		// everything will work without any issues.
+		if attempts >= RetryLimit {
+			return
+		}
+		time.Sleep(RetryDelay)
+	}
+
+	// Return the content of the body
+	defer resp.Body.Close()
+	respBody, err = ioutil.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+	if err != nil {
+		return
+	}
+
+	// For non-200 responses, return the status text
+	if resp.StatusCode != 200 {
+		return nil, errors.New(strings.TrimSpace(string(respBody)))
+	}
+
+	return
+}
+
 // GetSalt retreives a salt value from the data pool, given a 'hash1' value and optionally, a version id
 // If requested versionId is undefined or the latest, then only a single 'salt2' value is returned with the same version id as requested
 // If the requested versionId is not the latest, also returns an additional 'salt2' value along with the latest version id
@@ -204,66 +275,10 @@ func (c *Client) NewPassword(hash1 []byte) (*NewPassword, error) {
 func (c *Client) getSalt(hash []byte, versionID int64) (s *Salt, err error) {
 
 	uri := fmt.Sprintf("%s/%s/%s/%s", c.Config().Host(), c.Config().AppID(), hex.EncodeToString(hash), Version(versionID))
-	req, err := http.NewRequest("GET", uri, nil)
-	if err != nil {
-		return
-	}
-
-	for k, v := range c.Config().Headers() {
-		req.Header.Set(k, v)
-	}
-
-	var t time.Time
-	var attempts int
-	var resp *http.Response
-
-	// Attempt to connect until the attempt limit has been reached.
-	// Reset the timer in each loop so the final result will have the proper
-	// latency value
-	for {
-		t = time.Now()
-		resp, err = HTTPClient.Do(req)
-		if err == nil || attempts > RetryLimit {
-			break
-		}
-		if resp.TLS == nil {
-			panic("Unencrypted response")
-		}
-		c.incrErrs(0)
-		attempts++
-		time.Sleep(RetryDelay)
-	}
-
-	// If failed to send the request.
-	if err != nil {
-		return
-	}
-
-	latency := time.Since(t)
-
-	// Update stats regardless of what happens from here on out.
-	defer func() {
-		if err != nil {
-			c.incrErrs(latency)
-			return
-		}
-		c.incrSuccess(latency)
-	}()
+	bodyBytes, err := c.getFromAPI(uri)
 
 	// If request error, fail now.
 	if err != nil {
-		return
-	}
-
-	defer resp.Body.Close()
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return
-	}
-
-	// If not a 200 request, return the status text as the error message
-	if resp.StatusCode != http.StatusOK {
-		err = errors.New(strings.TrimSpace(string(bodyBytes)))
 		return
 	}
 
