@@ -29,7 +29,7 @@ func main() {
 ```
 
 You can also set parameters related to HTTP requests, and also enable/disable
-tracking of statisics:
+tracking of statistics:
 
 ```go
 import (
@@ -60,7 +60,5 @@ func main() {
 
 	// To disable the collection of stats, use DisableStats()
 	api.DisableStats()
-}
-
 }
 ```
