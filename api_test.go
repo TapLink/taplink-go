@@ -6,6 +6,9 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -26,10 +29,110 @@ var (
 	testPasswordSumHashStr = "38a9799aaabfb4521417d4cc84a101523c2f933b7a583636591483aded3afc07b243ce96d49f6d0be86127cd738c80938676752669d323253c3f434c04191cad"
 )
 
+type hexString string
+
+func (s hexString) Bytes() []byte {
+	b, _ := hex.DecodeString(string(s))
+	return b
+}
+
+func newTestServerErr() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, http.StatusText(503), 503)
+	}))
+}
+
+func newTestServerInvalidJSON() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "foobar")
+	}))
+}
+
+func newTestServerInvalidHexString() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"s2":"---invalid hex string here---","vid":3}`)
+	}))
+}
+
 func TestNew(t *testing.T) {
 	a := New(testAppID)
 	assert.Equal(t, testAppID, a.Config().AppID())
 	assert.Equal(t, "https://api.taplink.co", a.Config().Host())
+}
+
+func TestWithTestServer(t *testing.T) {
+	testServer = newTestServerErr()
+	defer func() {
+		testServer.Close()
+		testServer = nil
+	}()
+	c := New(testAppID).(*Client)
+	_, err := c.getFromAPI("/foobar")
+	assert.Equal(t, http.StatusText(503), err.Error())
+}
+
+func TestWithInvalidJSONResponse(t *testing.T) {
+	testServer = newTestServerInvalidJSON()
+	defer func() {
+		testServer.Close()
+		testServer = nil
+	}()
+	c := New(testAppID).(*Client)
+	_, err := c.getSalt([]byte(""), 0)
+	assert.True(t, strings.HasPrefix(err.Error(), "invalid character"))
+}
+
+func TestWithInvalidHexStringResponse(t *testing.T) {
+	testServer = newTestServerInvalidHexString()
+	defer func() {
+		testServer.Close()
+		testServer = nil
+	}()
+	c := New(testAppID).(*Client)
+	_, err := c.getSalt([]byte(""), 0)
+	assert.Equal(t, hex.ErrLength, err)
+}
+
+func newTestServerReadFailure() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "123214124")
+	}))
+}
+
+func TestWithReadFailure(t *testing.T) {
+	testServer = newTestServerReadFailure()
+	defer func() {
+		testServer.Close()
+		testServer = nil
+	}()
+	c := New(testAppID).(*Client)
+	_, err := c.getFromAPI("/foo")
+	assert.EqualError(t, err, "unexpected EOF")
+}
+
+func TestInvalidURL(t *testing.T) {
+	c := New(testAppID).(*Client)
+	_, err := c.getFromAPI("http:%2F%2F127.0.0.1:8000/foobar")
+	assert.Error(t, err)
+}
+
+// TestHTTPClientFailure tests a request to a bogus server/port to ensure that
+// the HTTPClient fails and the RetryLimit and RetryDelay are respected.
+func TestHTTPClientFailure(t *testing.T) {
+	c := New(testAppID).(*Client)
+	c.EnableStats()
+	// First attempt isn't delayed, so subtract 1 from the RetryLimit
+	expectedTime := time.Now().Add(RetryDelay * time.Duration(RetryLimit-1))
+	_, err := c.getFromAPI("http://127.0.0.1:123456/foobar")
+	assert.NotNil(t, err)
+	assert.Equal(t, int64(RetryLimit), c.Errors())
+	assert.True(t, time.Now().After(expectedTime))
+}
+
+func TestInvalidRequest(t *testing.T) {
+	c := New(testAppID).(*Client)
+	_, err := c.getFromAPI("://foobar")
+	assert.Error(t, err)
 }
 
 func TestIncErrs(t *testing.T) {
@@ -78,7 +181,6 @@ func TestGetSalt(t *testing.T) {
 
 func TestGetSaltErr(t *testing.T) {
 	c := New(testAppID).(*Client)
-	c.EnableStats()
 	s, err := c.getSalt(nil, 0)
 	assert.Nil(t, s)
 	assert.Error(t, err)
@@ -182,13 +284,6 @@ func TestGetFromAPIError(t *testing.T) {
 	assert.Panics(t, func() {
 		c.getFromAPI("http://example.com")
 	})
-}
-
-type hexString string
-
-func (s hexString) Bytes() []byte {
-	b, _ := hex.DecodeString(string(s))
-	return b
 }
 
 // TestVectorsV3 runs tests for correctness of the results vs. known values

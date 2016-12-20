@@ -11,6 +11,8 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -30,8 +32,12 @@ var (
 	// RetryDelay is the duration to wait between retry attempts
 	RetryDelay = 1 * time.Second
 
-	// testResponse
+	// mockResponse defines a response which is used for HTTP requests if not nil
 	mockResponse *testResponse
+
+	// testServer defines a http test server. If not nil, it will be used in place
+	// of the real HTTP endpoints
+	testServer *httptest.Server
 
 	// maxResponseSize is the largest Content-Length allowed from the API
 	// prevents consuming too much memory from overly large upstream responses
@@ -204,14 +210,26 @@ func (c *Client) NewPassword(hash1 []byte) (*NewPassword, error) {
 	return &NewPassword{VersionID: salt.VersionID, Hash: sum.Sum(nil)}, nil
 }
 
-func (c *Client) getFromAPI(uri string) (respBody []byte, err error) {
+func (c *Client) getFromAPI(uriStr string) (respBody []byte, err error) {
 
 	// if defined a mockResponse for testing, then return it instead of doing an actual HTTP request.
 	if mockResponse != nil {
 		return mockResponse.body, mockResponse.err
 	}
 
-	req, _ := http.NewRequest("GET", uri, nil)
+	// Parse the URL
+	uri, _ := url.Parse(uriStr)
+
+	// If test server exists, rewrite the host/port to be that of the test server.
+	if testServer != nil {
+		uriStr = fmt.Sprintf("%s%s", testServer.URL, uri.Path)
+	}
+
+	req, err := http.NewRequest("GET", uriStr, nil)
+	if err != nil {
+		return nil, err
+	}
+
 	for k, v := range c.Config().Headers() {
 		req.Header.Set(k, v)
 	}
@@ -227,8 +245,8 @@ func (c *Client) getFromAPI(uri string) (respBody []byte, err error) {
 		attempts++
 		t = time.Now()
 		resp, err = HTTPClient.Do(req)
-		// Make sure it was sent with TLS
-		if resp != nil && resp.TLS == nil {
+		// Make sure it was sent with TLS, but only if it's a real response
+		if testServer == nil && resp != nil && resp.TLS == nil {
 			panic("Unencrypted response")
 		}
 		if err == nil {
