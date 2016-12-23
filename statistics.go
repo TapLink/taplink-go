@@ -32,15 +32,21 @@ func newStatistics() *statistics {
 
 // Enable enables the tracking of request statistics.
 func (s *statistics) Enable() {
+	s.mu.Lock()
 	s.enabled = true
+	s.mu.Unlock()
 }
 
 // Disable disables the tracking of request statistics
 func (s *statistics) Disable() {
+	s.mu.Lock()
 	s.enabled = false
+	s.mu.Unlock()
 }
 
 func (s *statistics) AddLatency(host string, latency time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if !s.enabled {
 		return
 	}
@@ -50,6 +56,8 @@ func (s *statistics) AddLatency(host string, latency time.Duration) {
 }
 
 func (s *statistics) AddError(host string, code int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if !s.enabled {
 		return
 	}
@@ -58,6 +66,8 @@ func (s *statistics) AddError(host string, code int) {
 }
 
 func (s *statistics) AddTimeout(host string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if !s.enabled {
 		return
 	}
@@ -66,6 +76,8 @@ func (s *statistics) AddTimeout(host string) {
 }
 
 func (s *statistics) Get(host string) HostStats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.init(host)
 	return s.stats[host]
 }

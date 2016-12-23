@@ -50,7 +50,6 @@ func TestGetFromClientServerErr(t *testing.T) {
 	c.Stats().Enable()
 
 	_, err := c.getFromAPI("/foobar")
-	t.Logf("Error: %v\n", err)
 	assert.Error(t, err)
 	assert.Equal(t, int(RetryLimit), c.Stats().Get(DefaultHost).Errors().Count(500))
 	assert.Equal(t, int(RetryLimit), c.Stats().Get(DefaultHost).Errors().Len())

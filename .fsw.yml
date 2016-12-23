@@ -5,7 +5,7 @@ triggers:
   - '**/*.go'
   - '**/*.c'
   - '**/*.py'
-  cmd: go test -v
+  cmd: go test -v -race -bench=. -benchtime=5s -benchmem
   shell: true
   delay: 100ms
   signal: KILL
