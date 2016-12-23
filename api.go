@@ -1,26 +1,19 @@
 package taplink
 
 import (
-	"bytes"
-	"crypto/hmac"
-	"crypto/sha512"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"io/ioutil"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
-	"strings"
-	"sync"
 	"time"
 )
 
+// Host selection algorithms
+const (
+	HostSelectRandom     = iota
+	HostSelectRoundRobin = iota
+)
+
 var (
-	// ensures the Client implements the API interface
-	_ API = (*Client)(nil)
 
 	// DefaultTimeout is the default HTTP request timeout
 	DefaultTimeout = 30 * time.Second
@@ -32,23 +25,14 @@ var (
 	// RetryDelay is the duration to wait between retry attempts
 	RetryDelay = 1 * time.Second
 
-	// mockResponse defines a response which is used for HTTP requests if not nil
-	mockResponse *testResponse
-
-	// testServer defines a http test server. If not nil, it will be used in place
-	// of the real HTTP endpoints
-	testServer *httptest.Server
-
 	// maxResponseSize is the largest Content-Length allowed from the API
 	// prevents consuming too much memory from overly large upstream responses
 	// that should theoretically never be the case, but it's there just in case
 	maxResponseSize int64 = 1024 * 500
-)
 
-type testResponse struct {
-	body []byte
-	err  error
-}
+	// ErrHostNotFound is returned if the given host does not exist
+	ErrHostNotFound = errors.New("host not found")
+)
 
 // API is an interface which exposes TapLink API functionality
 type API interface {
@@ -60,33 +44,8 @@ type API interface {
 	VerifyPassword(hash []byte, expectedHash []byte, versionID int64) (*VerifyPassword, error)
 	NewPassword(hash []byte) (*NewPassword, error)
 
-	// Requests returns the total number of HTTP requests made to the TapLink API, including those with errors and those without
-	Requests() int64
-
-	// Errors returns the total number of HTTP requests made to the TapLink API which ended in error
-	Errors() int64
-
-	// Latency returns the average latency of requests made to the TapLink API
-	Latency() time.Duration
-
-	// ErrorPct returns the pct of requests made to the TapLink API which ended in error.
-	ErrorPct() int64
-
-	// EnableStats starts the collection of stats regarding HTTP requests made to the TapLink API
-	EnableStats()
-
-	// DisableStats starts the collection of stats regarding HTTP requests made to the TapLink API
-	DisableStats()
-}
-
-// Client is a struct which implements the API interface
-type Client struct {
-	cfg             Configuration
-	reqCt, reqErrCt int64
-	reqLatency      []time.Duration
-	stats           bool
-
-	sync.RWMutex
+	// Stats returns stats about each host the client has connected to
+	Stats() Statistics
 }
 
 type saltResponse struct {
@@ -151,196 +110,10 @@ func (p NewPassword) String() string {
 func New(appID string) API {
 	cfg := &Config{
 		appID: appID,
-		host:  "https://api.taplink.co",
 		headers: map[string]string{
 			"User-Agent": userAgent,
 			"Accept":     "application/json",
 		},
 	}
-	return &Client{cfg: cfg}
-}
-
-// Config returns the current client configuration
-func (c *Client) Config() Configuration {
-	return c.cfg
-}
-
-// VerifyPassword verifies a password for an existing user which was stored using blind hashing.
-// 'hash'         - hash of the user's password
-// 'expected' - expected value of hash2
-// 'versionId'        - version identifier for data pool settings to use
-// If a new 'versionId' and 'hash2' value are returned, they can either be ignored, or both must be updated in the data store together which
-// will cause the latest data pool settings to be used when blind hashing for this user in the future.
-// If the versionID is 0, the default version will be used
-func (c *Client) VerifyPassword(hash []byte, expected []byte, versionID int64) (*VerifyPassword, error) {
-	salt, err := c.getSalt(hash, versionID)
-	if err != nil {
-		return nil, err
-	}
-	sum := hmac.New(sha512.New, salt.Salt)
-	sum.Write(hash)
-	vp := &VerifyPassword{Hash: sum.Sum(nil), NewVersionID: salt.NewVersionID, VersionID: salt.VersionID}
-	vp.Matched = bytes.Equal(vp.Hash, expected)
-	if vp.Matched && salt.VersionID != salt.NewVersionID && salt.NewSalt != nil {
-		sum2 := hmac.New(sha512.New, salt.NewSalt)
-		sum2.Write(hash)
-		vp.NewHash = sum2.Sum(nil)
-	}
-	return vp, nil
-}
-
-// NewPassword calculates 'salt1' and 'hash2' for a new password, using the latest data pool settings.
-// Also returns 'versionId' for the current settings, in case data pool settings are updated in the future
-// Inputs:
-//   'hash1Hex' - hash of the user's password, as a hex string
-//   'callback' - function(err, hash2Hex, versionId)
-//       o err       : 'err' from request, or null if request succeeded
-//       o hash2Hex  : value of 'hash2' as a hex string
-//       o versionId : version id of the current data pool settings used for this request
-func (c *Client) NewPassword(hash1 []byte) (*NewPassword, error) {
-	salt, err := c.getSalt(hash1, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	// Calculate the hash of the new salt
-	sum := hmac.New(sha512.New, salt.Salt)
-	sum.Write(hash1)
-
-	return &NewPassword{VersionID: salt.VersionID, Hash: sum.Sum(nil)}, nil
-}
-
-func (c *Client) getFromAPI(uriStr string) (respBody []byte, err error) {
-
-	// if defined a mockResponse for testing, then return it instead of doing an actual HTTP request.
-	if mockResponse != nil {
-		return mockResponse.body, mockResponse.err
-	}
-
-	// Parse the URL
-	uri, _ := url.Parse(uriStr)
-
-	// If test server exists, rewrite the host/port to be that of the test server.
-	if testServer != nil {
-		uriStr = fmt.Sprintf("%s%s", testServer.URL, uri.Path)
-	}
-
-	req, err := http.NewRequest("GET", uriStr, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	for k, v := range c.Config().Headers() {
-		req.Header.Set(k, v)
-	}
-
-	var t time.Time
-	var attempts int
-	var resp *http.Response
-
-	// Attempt to connect until the attempt limit has been reached.
-	// Reset the timer in each loop so the final result will have the proper
-	// latency value.
-	for {
-		attempts++
-		t = time.Now()
-		resp, err = HTTPClient.Do(req)
-		// Make sure it was sent with TLS, but only if it's a real response
-		if testServer == nil && resp != nil && resp.TLS == nil {
-			panic("Unencrypted response")
-		}
-		if err == nil {
-			c.incrSuccess(time.Since(t))
-			break
-		}
-		c.incrErrs(time.Since(t))
-
-		// If out of attempts, then just quit. Otherwise try again.
-		// We check here (after the request) so that even if RetryLimit < 1
-		// everything will work without any issues.
-		if attempts >= RetryLimit {
-			return
-		}
-		time.Sleep(RetryDelay)
-	}
-
-	// Return the content of the body
-	defer resp.Body.Close()
-	respBody, err = ioutil.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
-	if err != nil {
-		return
-	}
-
-	// For non-200 responses, return the status text
-	if resp.StatusCode != 200 {
-		return nil, errors.New(strings.TrimSpace(string(respBody)))
-	}
-
-	return
-}
-
-// GetSalt retreives a salt value from the data pool, given a 'hash1' value and optionally, a version id
-// If requested versionId is undefined or the latest, then only a single 'salt2' value is returned with the same version id as requested
-// If the requested versionId is not the latest, also returns an additional 'salt2' value along with the latest version id
-// Inputs:
-//    'hash1Hex'  - hex string containing value of hash1
-//    'versionId' - version identifier for data pool settings to use, or 0/null/undefined to use latest settings
-//    'callback'  - function(salt2Hex, versionId, newSalt2Hex, newVersionId)
-//       o salt2Hex     : hex string containing value of 'salt2'
-//       o versionId    : version id corresponding to the provided 'salt2Hex' value (will always match requested version, if one was specified)
-//       o newSalt2Hex  : hex string containing a new value of 'salt2' if newer data pool settings are available, otherwise undefined
-//       o newVersionId : a new version id, if newer data pool settings are available, otherwise undefined
-func (c *Client) getSalt(hash []byte, versionID int64) (s *Salt, err error) {
-
-	uri := fmt.Sprintf("%s/%s/%s/%s", c.Config().Host(), c.Config().AppID(), hex.EncodeToString(hash), Version(versionID))
-	bodyBytes, err := c.getFromAPI(uri)
-
-	// If request error, fail now.
-	if err != nil {
-		return
-	}
-
-	var sr saltResponse
-	err = json.Unmarshal(bodyBytes, &sr)
-	if err != nil {
-		return
-	}
-
-	// Use the values from the request in the return value
-	s = &Salt{NewVersionID: sr.NewVersionID, VersionID: sr.VersionID}
-
-	// Hex encoding is used over the wire, so decode here.
-	s.Salt, err = hex.DecodeString(sr.Salt2Hex)
-	if err != nil {
-		return
-	}
-
-	if sr.NewSalt2Hex == "" {
-		return
-	}
-
-	s.NewSalt, err = hex.DecodeString(sr.NewSalt2Hex)
-	return
-}
-
-func (c *Client) incrErrs(latency time.Duration) {
-	if !c.stats {
-		return
-	}
-	c.Lock()
-	c.reqErrCt++
-	if latency != 0 {
-		c.reqLatency = append(c.reqLatency, latency)
-	}
-	c.Unlock()
-}
-
-func (c *Client) incrSuccess(latency time.Duration) {
-	if !c.stats {
-		return
-	}
-	c.Lock()
-	c.reqCt++
-	c.reqLatency = append(c.reqLatency, latency)
-	c.Unlock()
+	return &Client{cfg: cfg, stats: newStatistics()}
 }

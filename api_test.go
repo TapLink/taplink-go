@@ -5,9 +5,10 @@ import (
 	"crypto/hmac"
 	"crypto/sha512"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/ioutil"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +28,8 @@ var (
 	testHashExpectedSaltBytes = hexString(testHashExpectedSalt).Bytes()
 
 	testPasswordSumHashStr = "38a9799aaabfb4521417d4cc84a101523c2f933b7a583636591483aded3afc07b243ce96d49f6d0be86127cd738c80938676752669d323253c3f434c04191cad"
+
+	origTransport = HTTPClient.Transport
 )
 
 type hexString string
@@ -36,35 +39,50 @@ func (s hexString) Bytes() []byte {
 	return b
 }
 
-func newTestServerErr() *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, http.StatusText(503), 503)
-	}))
+type testRoundTripper struct {
+	code    int
+	latency time.Duration
+	headers map[string]string
+	body    []byte
+	err     error
 }
 
-func newTestServerInvalidJSON() *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "foobar")
-	}))
-}
-
-func newTestServerInvalidHexString() *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"s2":"---invalid hex string here---","vid":3}`)
-	}))
+func (rt *testRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if rt.err != nil {
+		return nil, rt.err
+	}
+	if rt.latency > time.Duration(0) {
+		time.Sleep(rt.latency)
+	}
+	hdr := make(map[string][]string, 0)
+	if rt.code > 200 && rt.body == nil {
+		rt.body = []byte(http.StatusText(rt.code))
+	}
+	resp := &http.Response{
+		StatusCode: rt.code,
+		Status:     http.StatusText(rt.code),
+		Body:       ioutil.NopCloser(bytes.NewBuffer(rt.body)),
+		Header:     http.Header(hdr),
+	}
+	resp.Header.Set("X-TEST", "true")
+	if rt.headers != nil {
+		for k, v := range rt.headers {
+			resp.Header.Set(k, v)
+		}
+	}
+	return resp, nil
 }
 
 func TestNew(t *testing.T) {
 	a := New(testAppID)
 	assert.Equal(t, testAppID, a.Config().AppID())
-	assert.Equal(t, "https://api.taplink.co", a.Config().Host())
+	assert.Equal(t, "api.taplink.co", a.Config().Host())
 }
 
 func TestWithTestServer(t *testing.T) {
-	testServer = newTestServerErr()
+	HTTPClient.Transport = &testRoundTripper{503, 0, nil, nil, nil}
 	defer func() {
-		testServer.Close()
-		testServer = nil
+		HTTPClient.Transport = origTransport
 	}()
 	c := New(testAppID).(*Client)
 	_, err := c.getFromAPI("/foobar")
@@ -72,10 +90,9 @@ func TestWithTestServer(t *testing.T) {
 }
 
 func TestWithInvalidJSONResponse(t *testing.T) {
-	testServer = newTestServerInvalidJSON()
+	HTTPClient.Transport = &testRoundTripper{200, 0, nil, []byte("foobar"), nil}
 	defer func() {
-		testServer.Close()
-		testServer = nil
+		HTTPClient.Transport = origTransport
 	}()
 	c := New(testAppID).(*Client)
 	_, err := c.getSalt([]byte(""), 0)
@@ -83,28 +100,22 @@ func TestWithInvalidJSONResponse(t *testing.T) {
 }
 
 func TestWithInvalidHexStringResponse(t *testing.T) {
-	testServer = newTestServerInvalidHexString()
+	HTTPClient.Transport = &testRoundTripper{200, 0, nil, []byte(`{"s2":"---invalid hex string here---","vid":3}`), nil}
 	defer func() {
-		testServer.Close()
-		testServer = nil
+		HTTPClient.Transport = origTransport
 	}()
 	c := New(testAppID).(*Client)
 	_, err := c.getSalt([]byte(""), 0)
 	assert.Equal(t, hex.ErrLength, err)
 }
 
-func newTestServerReadFailure() *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Length", "123214124")
-	}))
-}
-
 func TestWithReadFailure(t *testing.T) {
-	testServer = newTestServerReadFailure()
+	hdr := map[string]string{"Content-Length": "111111111"}
+	HTTPClient.Transport = &testRoundTripper{200, 0, hdr, nil, nil}
 	defer func() {
-		testServer.Close()
-		testServer = nil
+		HTTPClient.Transport = origTransport
 	}()
+
 	c := New(testAppID).(*Client)
 	_, err := c.getFromAPI("/foo")
 	assert.EqualError(t, err, "unexpected EOF")
@@ -112,70 +123,78 @@ func TestWithReadFailure(t *testing.T) {
 
 func TestInvalidURL(t *testing.T) {
 	c := New(testAppID).(*Client)
-	_, err := c.getFromAPI("http:%2F%2F127.0.0.1:8000/foobar")
+	_, err := c.getFromAPI("/foobar")
 	assert.Error(t, err)
 }
 
 // TestHTTPClientFailure tests a request to a bogus server/port to ensure that
 // the HTTPClient fails and the RetryLimit and RetryDelay are respected.
 func TestHTTPClientFailure(t *testing.T) {
+	HTTPClient.Transport = &testRoundTripper{503, 0, nil, nil, errors.New("test error")}
+	defer func() {
+		HTTPClient.Transport = origTransport
+	}()
 	c := New(testAppID).(*Client)
-	c.EnableStats()
+	c.Stats().Enable()
 	// First attempt isn't delayed, so subtract 1 from the RetryLimit
 	expectedTime := time.Now().Add(RetryDelay * time.Duration(RetryLimit-1))
-	_, err := c.getFromAPI("http://127.0.0.1:123456/foobar")
+	host := c.Config().Host()
+	_, err := c.getFromAPI("/foobar")
 	assert.NotNil(t, err)
-	assert.Equal(t, int64(RetryLimit), c.Errors())
-	assert.True(t, time.Now().After(expectedTime))
+	assert.Equal(t, int(RetryLimit), c.Stats().Get(host).Errors().Len())
+	if !assert.True(t, time.Now().After(expectedTime)) {
+		t.Logf("Expected now (%d) to be after %d", time.Now().Unix(), expectedTime.Unix())
+	}
 }
 
 func TestInvalidRequest(t *testing.T) {
 	c := New(testAppID).(*Client)
-	_, err := c.getFromAPI("://foobar")
+	_, err := c.getFromAPI("/foobar")
 	assert.Error(t, err)
 }
 
 func TestIncErrs(t *testing.T) {
 	c := New(testAppID).(*Client)
-	assert.False(t, c.stats)
-	c.incrErrs(10 * time.Millisecond)
-	assert.Equal(t, int64(0), c.reqErrCt)
-	assert.Len(t, c.reqLatency, 0)
-	c.EnableStats()
-	c.incrErrs(10 * time.Millisecond)
-	assert.Equal(t, int64(1), c.reqErrCt)
-	assert.Len(t, c.reqLatency, 1)
+	host := c.Config().Host()
+	c.Stats().Disable()
+	c.Stats().AddError(host, 999)
+	assert.Equal(t, 0, c.Stats().Get(host).Errors().Len())
+	c.Stats().Enable()
+	c.Stats().AddError(host, 999)
+	assert.Equal(t, 1, c.Stats().Get(host).Errors().Len())
 }
 
 func TestIncErrsNoLatency(t *testing.T) {
 	c := New(testAppID).(*Client)
-	c.EnableStats()
-	c.incrErrs(0)
-	assert.Equal(t, int64(1), c.reqErrCt)
-	assert.Len(t, c.reqLatency, 0)
+	host := c.Config().Host()
+	errCode := 503
+	c.Stats().Enable()
+	c.Stats().AddError(host, errCode)
+	assert.Equal(t, 1, c.Stats().Get(host).Errors().Len())
+	assert.Equal(t, 0, c.Stats().Get(host).Latency().Len())
 }
 
 func TestIncSuccess(t *testing.T) {
 	c := New(testAppID).(*Client)
-	assert.False(t, c.stats)
-	c.incrSuccess(10 * time.Millisecond)
-	assert.Equal(t, int64(0), c.reqCt)
-	assert.Len(t, c.reqLatency, 0)
-	c.EnableStats()
-	c.incrSuccess(10 * time.Millisecond)
-	assert.Equal(t, int64(1), c.reqCt)
-	assert.Len(t, c.reqLatency, 1)
+	host := c.Config().Host()
+	c.Stats().Disable()
+	c.Stats().AddLatency(host, 10*time.Millisecond)
+	assert.Equal(t, 0, c.Stats().Get(host).Latency().Len())
+	c.Stats().Enable()
+	c.Stats().AddLatency(host, 10*time.Millisecond)
+	assert.Equal(t, 1, c.Stats().Get(host).Latency().Len())
 }
 
 func TestGetSalt(t *testing.T) {
 	c := New(testAppID).(*Client)
-	c.EnableStats()
+	c.Stats().Enable()
+	host := c.Config().Host()
 	s, err := c.getSalt(testHashBytes, 0)
 	if !assert.NoError(t, err) {
 		return
 	}
 	assert.Equal(t, s.Salt, testHashExpectedSaltBytes)
-	assert.Equal(t, int64(1), c.Requests())
+	assert.Equal(t, int(1), c.Stats().Get(host).Requests())
 	assert.Equal(t, testHashExpectedSalt, fmt.Sprintf("%s", s))
 }
 
@@ -268,24 +287,6 @@ func TestVersionID(t *testing.T) {
 	assert.Equal(t, "1", fmt.Sprintf("%s", Version(1)))
 }
 
-func TestGetFromAPIMock(t *testing.T) {
-	c := New(testAppID).(*Client)
-	mockResponse = &testResponse{[]byte("foo"), nil}
-	defer func() {
-		mockResponse = nil
-	}()
-	body, err := c.getFromAPI("foo")
-	assert.Equal(t, mockResponse.body, body)
-	assert.Equal(t, mockResponse.err, err)
-}
-
-func TestGetFromAPIError(t *testing.T) {
-	c := New(testAppID).(*Client)
-	assert.Panics(t, func() {
-		c.getFromAPI("http://example.com")
-	})
-}
-
 // TestVectorsV3 runs tests for correctness of the results vs. known values
 func TestVectorsV3(t *testing.T) {
 
@@ -339,14 +340,15 @@ func TestVectorsV2(t *testing.T) {
 // BenchmarkGetSalt tests parallel performance of getting multiple salts from a single client
 // To avoid making requests over the network, a pre-defined response is set.
 func BenchmarkGetSalt(b *testing.B) {
+
+	HTTPClient.Transport = &testRoundTripper{200, 0, nil, []byte(`{"s2":"edb8b9f2560a5bb7a354ca14c0dd72c377474fbad0afb9d73dd8fa01210777b995320979df40c7eab64450a7ef368ff8019350c613538f6abad9c4d9d8879bf5","vid":3}`), nil}
 	defer func() {
-		mockResponse = nil
+		HTTPClient.Transport = origTransport
 	}()
 
 	var i int
 	var mu sync.Mutex
 	c := New(testAppID).(*Client)
-	mockResponse = &testResponse{[]byte(`{"s2":"edb8b9f2560a5bb7a354ca14c0dd72c377474fbad0afb9d73dd8fa01210777b995320979df40c7eab64450a7ef368ff8019350c613538f6abad9c4d9d8879bf5","vid":3}`), nil}
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {

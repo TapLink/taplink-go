@@ -9,31 +9,26 @@ import (
 
 func TestLatency(t *testing.T) {
 	c := &Client{}
-	c.reqLatency = []time.Duration{
-		10 * time.Millisecond,
-		20 * time.Millisecond,
-		30 * time.Millisecond,
-		40 * time.Millisecond,
-		50 * time.Millisecond,
-	}
-	assert.Equal(t, 30*time.Millisecond, c.Latency())
+	c.Stats().Enable()
+	c.Stats().AddLatency("foobar.com", 10*time.Millisecond)
+	c.Stats().AddLatency("foobar.com", 20*time.Millisecond)
+	c.Stats().AddLatency("foobar.com", 30*time.Millisecond)
+	c.Stats().AddLatency("foobar.com", 40*time.Millisecond)
+	c.Stats().AddLatency("foobar.com", 50*time.Millisecond)
+	assert.Equal(t, 30*time.Millisecond, c.Stats().Get("foobar.com").Latency().Avg())
 }
 
-func TestErrorPct(t *testing.T) {
+func TestStatsGetNil(t *testing.T) {
 	c := &Client{}
-	c.reqCt = 100
-	c.reqErrCt = 10
-	assert.Equal(t, int64(10), c.ErrorPct())
+	assert.NotPanics(t, func() {
+		c.Stats().Get("foobar")
+	})
 }
 
-func TestEnableStats(t *testing.T) {
-	c := &Client{}
-	c.EnableStats()
-	assert.True(t, c.stats)
-}
-
-func TestDisableStatus(t *testing.T) {
-	c := &Client{}
-	c.DisableStats()
-	assert.False(t, c.stats)
+func TestStatsEnabled(t *testing.T) {
+	s := &statistics{}
+	s.Enable()
+	assert.True(t, s.enabled)
+	s.Disable()
+	assert.False(t, s.enabled)
 }
