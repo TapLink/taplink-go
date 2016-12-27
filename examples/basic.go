@@ -3,7 +3,7 @@ package examples
 import (
 	"log"
 
-	"github.com/TapLink/taplink-go"
+	"github.com/bradberger/taplink-go"
 )
 
 func main() {

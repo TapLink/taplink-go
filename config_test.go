@@ -84,9 +84,11 @@ func TestConfigHost(t *testing.T) {
 	// First up, test random. Just make sure it doesn't panic since we
 	// can't know the exact result other than if it's in bounds
 	HostSelectionMethod = HostSelectRandom
-	assert.NotPanics(t, func() {
-		c.Host()
-	})
+	for i := 0; i < 10; i++ {
+		assert.NotPanics(t, func() {
+			c.Host()
+		})
+	}
 
 	// Now test round robin
 	HostSelectionMethod = HostSelectRoundRobin

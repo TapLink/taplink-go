@@ -4,7 +4,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/TapLink/taplink-go"
+	"github.com/bradberger/taplink-go"
 )
 
 func mainAlt() {
