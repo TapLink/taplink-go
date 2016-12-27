@@ -1,3 +1,6 @@
+[![Build Status](https://semaphoreci.com/api/v1/brad/taplink-go/branches/master/shields_badge.svg)](https://semaphoreci.com/brad/taplink-go)
+[![codecov](https://codecov.io/gh/bradberger/taplink-go/branch/master/graph/badge.svg)](https://codecov.io/gh/bradberger/taplink-go)
+
 ## Usage
 
 Basic usage is as follows:
