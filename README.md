@@ -66,12 +66,6 @@ func main() {
 	// After loading config, you can access the list of servers the client can connect to with Config().Servers
 	log.Println("using servers", api.Config().Servers())
 
-	// To change the connection strategy to use a random server:
-	taplink.HostSelectionMethod = taplink.HostSelectRandom
-
-	// To change the connection strategy to use a round robin selection stragegy:
-	taplink.HostSelectionMethod = taplink.HostSelectRoundRobin
-
 	// To get the stats, use these funcs...
 	log.Println("total number of requests made", api.Stats().Get(taplink.DefaultHost).Requests())
 	log.Println("history of latency for each successful request", api.Stats().Get(taplink.DefaultHost).Latency())
