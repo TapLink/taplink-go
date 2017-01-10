@@ -1,6 +1,7 @@
 package taplink
 
 import (
+	"sort"
 	"sync"
 	"time"
 )
@@ -13,17 +14,19 @@ var (
 type Statistics interface {
 	Enable()
 	Disable()
-	AddLatency(host string, latency time.Duration)
+	AddSuccess(host string, latency time.Duration)
 	AddError(host string, code int)
 	AddTimeout(host string)
 	Get(host string) HostStats
+	SetServers(servers []string)
+	Hosts() []string
 }
 
 type statistics struct {
 	enabled bool
 	stats   map[string]*hostStatistics
 
-	mu sync.Mutex
+	mu sync.RWMutex
 }
 
 func newStatistics() *statistics {
@@ -44,15 +47,14 @@ func (s *statistics) Disable() {
 	s.mu.Unlock()
 }
 
-func (s *statistics) AddLatency(host string, latency time.Duration) {
+func (s *statistics) AddSuccess(host string, latency time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.enabled {
 		return
 	}
 	s.init(host)
-	l := append([]time.Duration(s.stats[host].latency), latency)
-	s.stats[host].latency = Latency(l)
+	s.stats[host].latency = append(s.stats[host].latency, successResp{time.Now(), latency})
 }
 
 func (s *statistics) AddError(host string, code int) {
@@ -62,7 +64,7 @@ func (s *statistics) AddError(host string, code int) {
 		return
 	}
 	s.init(host)
-	s.stats[host].errors[code]++
+	s.stats[host].errors = append(s.stats[host].errors, errorResp{time.Now(), code})
 }
 
 func (s *statistics) AddTimeout(host string) {
@@ -72,7 +74,7 @@ func (s *statistics) AddTimeout(host string) {
 		return
 	}
 	s.init(host)
-	s.stats[host].timeouts++
+	s.stats[host].timeouts = append(s.stats[host].timeouts, timeoutResp{time.Now()})
 }
 
 func (s *statistics) Get(host string) HostStats {
@@ -82,7 +84,51 @@ func (s *statistics) Get(host string) HostStats {
 	return s.stats[host]
 }
 
+// SetServers initializes statistics for the given servers
+func (s *statistics) SetServers(servers []string) {
+	for i := range servers {
+		s.init(servers[i])
+	}
+}
+
+type hostFailRate []hostStatistics
+
+func (hfr hostFailRate) Len() int { return len(hfr) }
+
+func (hfr hostFailRate) Swap(i, j int) { hfr[i], hfr[j] = hfr[j], hfr[i] }
+
+func (hfr hostFailRate) Less(i, j int) bool {
+	im := hfr[i].Last(time.Minute)
+	jm := hfr[j].Last(time.Minute)
+	return im.ErrorRate() < jm.ErrorRate() || im.Latency().Avg() < jm.Latency().Avg()
+}
+
+func (hfr hostFailRate) Hosts() []string {
+	hosts := make([]string, len(hfr))
+	for i := range hfr {
+		hosts[i] = hfr[i].Host()
+	}
+	return hosts
+}
+
+// Hosts returns a sorted slice of hosts, with the most optimal host being first.
+// Hosts are sorted by error rate and if error rate is equal, then latency.
+func (s *statistics) Hosts() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	l := make([]hostStatistics, 0)
+	for h := range s.stats {
+		l = append(l, *s.stats[h])
+	}
+	hfr := hostFailRate(l)
+	sort.Sort(hfr)
+	return hfr.Hosts()
+}
+
 func (s *statistics) init(host string) {
+	if s.stats == nil {
+		s.stats = make(map[string]*hostStatistics, 0)
+	}
 	if _, ok := s.stats[host]; !ok {
 		s.stats[host] = newHostStatistics(host)
 	}

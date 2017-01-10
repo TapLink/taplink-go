@@ -25,17 +25,13 @@ var (
 
 // Client is a struct which implements the API interface
 type Client struct {
-	cfg   Configuration
-	stats *statistics
+	cfg Configuration
 	sync.RWMutex
 }
 
 // Stats returns stats about connections to the server
 func (c *Client) Stats() Statistics {
-	if c.stats == nil {
-		c.stats = newStatistics()
-	}
-	return c.stats
+	return c.cfg.Stats()
 }
 
 // Config returns the current client configuration
@@ -103,9 +99,10 @@ func (c *Client) getFromAPI(path string) (respBody []byte, err error) {
 			time.Sleep(RetryDelay)
 		}
 
-		attempts++
 		t := time.Now()
-		host := c.Config().Host()
+		host := c.Config().Host(attempts)
+
+		attempts++
 		urlStr := fmt.Sprintf("https://%s/%s", host, strings.TrimPrefix(path, "/"))
 		req, _ := http.NewRequest("GET", urlStr, nil)
 		for k, v := range c.Config().Headers() {
@@ -152,7 +149,7 @@ func (c *Client) getFromAPI(path string) (respBody []byte, err error) {
 			return nil, errors.New(strings.TrimSpace(string(respBody)))
 		// Otherwise redirects 3xx or success 2xx are okay
 		default:
-			c.Stats().AddLatency(host, latency)
+			c.Stats().AddSuccess(host, latency)
 			return
 		}
 	}

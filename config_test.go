@@ -34,7 +34,7 @@ func TestCfgAppID(t *testing.T) {
 
 func TestCfgHost(t *testing.T) {
 	c := &Config{}
-	assert.Equal(t, DefaultHost, c.Host())
+	assert.Equal(t, DefaultHost, c.Host(0))
 }
 
 func TestCfgHeaders(t *testing.T) {
@@ -67,35 +67,18 @@ func TestClientCfg(t *testing.T) {
 
 func TestConfigHost(t *testing.T) {
 	c := &Config{options: &Options{Servers: []string{}}}
-	defer func() {
-		HostSelectionMethod = DefaultHostSelectionMethod
-	}()
 
 	// Test default host
-	assert.Equal(t, DefaultHost, c.Host())
+	assert.Equal(t, DefaultHost, c.Host(0))
 
 	// Test with only one host.
 	c.options.Servers = []string{"foobar.com"}
-	assert.Equal(t, "foobar.com", c.Host())
+	assert.Equal(t, "foobar.com", c.Host(0))
 
 	// Test with multiple hosts
 	c.options.Servers = []string{"foobar.com", "abc.foobar.com"}
 
-	// First up, test random. Just make sure it doesn't panic since we
-	// can't know the exact result other than if it's in bounds
-	HostSelectionMethod = HostSelectRandom
 	for i := 0; i < 10; i++ {
-		assert.NotPanics(t, func() {
-			c.Host()
-		})
+		assert.Equal(t, c.options.Servers[i%2], c.Host(i))
 	}
-
-	// Now test round robin
-	HostSelectionMethod = HostSelectRoundRobin
-	assert.Equal(t, 0, c.nextServer)
-	assert.Equal(t, "foobar.com", c.Host())
-	assert.Equal(t, 1, c.nextServer)
-	assert.Equal(t, "abc.foobar.com", c.Host())
-	assert.Equal(t, 0, c.nextServer)
-	assert.Equal(t, "foobar.com", c.Host())
 }

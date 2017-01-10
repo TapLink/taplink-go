@@ -3,14 +3,8 @@ package taplink
 import (
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"sync"
 	"time"
-)
-
-const (
-	// DefaultHostSelectionMethod is the default host selection method if none is supplied
-	DefaultHostSelectionMethod = HostSelectRandom
 )
 
 var (
@@ -21,19 +15,18 @@ var (
 
 	// DefaultHost is the default API host
 	DefaultHost = "api.taplink.co"
-
-	// HostSelectionMethod is the algorithm used for choosing hosts
-	HostSelectionMethod = HostSelectRandom
 )
 
 // Configuration defines an interface which provides configuration info for requests to the API
 type Configuration interface {
 	AppID() string
-	Host() string
+	Host(attempts int) string
 	Headers() map[string]string
 	LastModified() time.Time
 	Servers() []string
 	Load() error
+
+	Stats() Statistics
 }
 
 // Options is the options API response
@@ -51,7 +44,7 @@ type Config struct {
 	keepAlive time.Duration
 	client    API
 
-	nextServer int
+	stats *statistics
 
 	sync.RWMutex
 }
@@ -59,25 +52,37 @@ type Config struct {
 // Load gets the configuration options from the API for the given app ID.
 func (c *Config) Load() error {
 	if c.options == nil {
-		c.Lock()
-		c.options = &Options{}
-		c.Unlock()
+		// c.Lock()
+		c.options = &Options{Servers: make([]string, 0)}
+		// c.Unlock()
 	}
 	resp, err := HTTPClient.Get(fmt.Sprintf("https://%s/%s", DefaultHost, c.appID))
 	if err != nil || resp.StatusCode != 200 {
 		return fmt.Errorf("Could not get configuration: %v", err)
 	}
-	c.Lock()
-	defer c.Unlock()
+	// c.Lock()
+	// defer c.Unlock()
 	if err := json.NewDecoder(resp.Body).Decode(c.options); err != nil {
 		return err
 	}
+	// Init stats for each server.
+	c.Stats().SetServers(c.options.Servers)
 	return nil
 }
 
 // AppID returns the app ID
 func (c *Config) AppID() string {
 	return c.appID
+}
+
+// Stats returns a statistics interface for enabling/disabling/managing statistics.
+func (c *Config) Stats() Statistics {
+	c.Lock()
+	defer c.Unlock()
+	if c.stats == nil {
+		c.stats = newStatistics()
+	}
+	return c.stats
 }
 
 type hostStats struct {
@@ -87,27 +92,17 @@ type hostStats struct {
 
 // Host returns the API server to connect to based on the available servers
 // and the host selection algorithm
-func (c *Config) Host() string {
+func (c *Config) Host(attempts int) string {
 
 	hosts := c.Servers()
-
-	c.Lock()
-	defer c.Unlock()
-	switch {
-	case len(hosts) == 0:
+	if len(hosts) == 0 {
 		return DefaultHost
-	case len(hosts) == 1:
-		return hosts[0]
-	case HostSelectionMethod == HostSelectRoundRobin:
-		host := hosts[c.nextServer]
-		c.nextServer++
-		if c.nextServer >= len(hosts) {
-			c.nextServer = 0
-		}
-		return host
-	default: // HostSelectRandom
-		return hosts[rand.Intn(len(hosts))]
 	}
+	// For the first attempt, return the first (primary) host
+	if len(hosts) == 1 {
+		return hosts[0]
+	}
+	return hosts[attempts%len(hosts)]
 }
 
 // Headers returns the headers to be added to each request

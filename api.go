@@ -110,10 +110,11 @@ func (p NewPassword) String() string {
 func New(appID string) API {
 	cfg := &Config{
 		appID: appID,
+		stats: newStatistics(),
 		headers: map[string]string{
 			"User-Agent": userAgent,
 			"Accept":     "application/json",
 		},
 	}
-	return &Client{cfg: cfg, stats: newStatistics()}
+	return &Client{cfg: cfg}
 }

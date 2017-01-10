@@ -76,7 +76,7 @@ func (rt *testRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 func TestNew(t *testing.T) {
 	a := New(testAppID)
 	assert.Equal(t, testAppID, a.Config().AppID())
-	assert.Equal(t, "api.taplink.co", a.Config().Host())
+	assert.Equal(t, "api.taplink.co", a.Config().Host(0))
 }
 
 func TestWithTestServer(t *testing.T) {
@@ -138,7 +138,7 @@ func TestHTTPClientFailure(t *testing.T) {
 	c.Stats().Enable()
 	// First attempt isn't delayed, so subtract 1 from the RetryLimit
 	expectedTime := time.Now().Add(RetryDelay * time.Duration(RetryLimit-1))
-	host := c.Config().Host()
+	host := c.Config().Host(0)
 	_, err := c.getFromAPI("/foobar")
 	assert.NotNil(t, err)
 	assert.Equal(t, int(RetryLimit), c.Stats().Get(host).Errors().Len())
@@ -155,7 +155,7 @@ func TestInvalidRequest(t *testing.T) {
 
 func TestIncErrs(t *testing.T) {
 	c := New(testAppID).(*Client)
-	host := c.Config().Host()
+	host := c.Config().Host(0)
 	c.Stats().Disable()
 	c.Stats().AddError(host, 999)
 	assert.Equal(t, 0, c.Stats().Get(host).Errors().Len())
@@ -166,7 +166,7 @@ func TestIncErrs(t *testing.T) {
 
 func TestIncErrsNoLatency(t *testing.T) {
 	c := New(testAppID).(*Client)
-	host := c.Config().Host()
+	host := c.Config().Host(0)
 	errCode := 503
 	c.Stats().Enable()
 	c.Stats().AddError(host, errCode)
@@ -176,19 +176,19 @@ func TestIncErrsNoLatency(t *testing.T) {
 
 func TestIncSuccess(t *testing.T) {
 	c := New(testAppID).(*Client)
-	host := c.Config().Host()
+	host := c.Config().Host(0)
 	c.Stats().Disable()
-	c.Stats().AddLatency(host, 10*time.Millisecond)
+	c.Stats().AddSuccess(host, 10*time.Millisecond)
 	assert.Equal(t, 0, c.Stats().Get(host).Latency().Len())
 	c.Stats().Enable()
-	c.Stats().AddLatency(host, 10*time.Millisecond)
+	c.Stats().AddSuccess(host, 10*time.Millisecond)
 	assert.Equal(t, 1, c.Stats().Get(host).Latency().Len())
 }
 
 func TestGetSalt(t *testing.T) {
 	c := New(testAppID).(*Client)
 	c.Stats().Enable()
-	host := c.Config().Host()
+	host := c.Config().Host(0)
 	s, err := c.getSalt(testHashBytes, 0)
 	if !assert.NoError(t, err) {
 		return
