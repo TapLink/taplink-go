@@ -94,6 +94,16 @@ func newHostStatistics(host string) *hostStatistics {
 	}
 }
 
+// CopyOf returns a copy of the hostStatistics without copying the lock
+func (s *hostStatistics) CopyOf() hostStatistics {
+	return hostStatistics{
+		errors:   s.errors,
+		timeouts: s.timeouts,
+		latency:  s.latency,
+		host:     s.host,
+	}
+}
+
 func (s *hostStatistics) Host() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -143,7 +153,7 @@ func (s *hostStatistics) ErrorRate() float64 {
 	return float64(errCt) / float64(totalCt)
 }
 
-// Since returns a subset of the host statistics for events which happend between now and since.
+// Since returns a subset of the host statistics for events which happened between now and since.
 func (s *hostStatistics) Last(last time.Duration) HostStats {
 
 	s.mu.RLock()

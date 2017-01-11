@@ -246,11 +246,18 @@ func TestVerifyPasswordNewVersion(t *testing.T) {
 	// Get the old expected. Need to use the older version of getSalt for that.
 	// Cannot depend on NewPassword because it uses the latest version.
 	salt, err := c.getSalt(testHashBytes, 2)
+	if !assert.NoError(t, err) {
+		return
+	}
+
 	prevSum := hmac.New(sha512.New, salt.Salt)
 	prevSum.Write(testHashBytes)
 	prevExpected := prevSum.Sum(nil)
 
 	v, err := c.VerifyPassword(testHashBytes, prevExpected, 2)
+	if !assert.NoError(t, err) {
+		return
+	}
 
 	// Now get the expected values for the new version. These will then be comparted to
 	// the VerifyPassword NewHash field.
@@ -332,6 +339,9 @@ func TestVectorsV2(t *testing.T) {
 	assert.Equal(t, hexString("d883c376526904dd90bd69709d259e7d4ac4fe1ee3ff65a2b6ed2920c8baad326b0c2043c6bb7750c6ad02284c2365d3c61298649107924cc44e60450031fbd2").Bytes(), hash2)
 
 	p, err := c.VerifyPassword(hash1, hash2, 2)
+	if !assert.NoError(t, err) {
+		return
+	}
 	assert.True(t, p.Matched)
 	assert.Equal(t, int64(3), p.NewVersionID)
 	assert.Equal(t, hexString("9a4893d65a8eec23e520d0c7abe9c170ba61548c754b4805226e48d7519c55ed7f0daec920c5a99019042745007b99822e6853b8620be67955610b6d25f4b2f9").Bytes(), p.NewHash)

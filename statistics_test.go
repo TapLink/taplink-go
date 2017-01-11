@@ -44,7 +44,7 @@ func TestHostSorting(t *testing.T) {
 	b := newHostStatistics("bar.com")
 	f.errors = []errorResp{{time.Now(), 503}}
 	b.latency = []successResp{{time.Now(), time.Millisecond}}
-	l := hostFailRate([]hostStatistics{*f, *b})
+	l := hostFailRate([]hostStatistics{f.CopyOf(), b.CopyOf()})
 	sort.Sort(l)
 	assert.Equal(t, []string{"bar.com", "foo.com"}, l.Hosts())
 

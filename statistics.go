@@ -95,7 +95,7 @@ type hostFailRate []hostStatistics
 
 func (hfr hostFailRate) Len() int { return len(hfr) }
 
-func (hfr hostFailRate) Swap(i, j int) { hfr[i], hfr[j] = hfr[j], hfr[i] }
+func (hfr hostFailRate) Swap(i, j int) { hfr[i], hfr[j] = hfr[j].CopyOf(), hfr[i].CopyOf() }
 
 func (hfr hostFailRate) Less(i, j int) bool {
 	im := hfr[i].Last(time.Minute)
@@ -118,7 +118,7 @@ func (s *statistics) Hosts() []string {
 	defer s.mu.RUnlock()
 	l := make([]hostStatistics, 0)
 	for h := range s.stats {
-		l = append(l, *s.stats[h])
+		l = append(l, s.stats[h].CopyOf())
 	}
 	hfr := hostFailRate(l)
 	sort.Sort(hfr)
